@@ -15,6 +15,7 @@ const int d = 4; // dimensions: owner, status, income, borrower
 
 enum Status { Single, Married, Divorced };
 
+//single record structure
 struct Record : public __wrap_iter<::Record *> {
     Record(int id, bool owner, Status status, double income, bool borrower);
     Record& operator=(Record r);
@@ -23,7 +24,7 @@ struct Record : public __wrap_iter<::Record *> {
     string num(int value, int space);
     string getOwner();
     string getStatus();
-    string getProp();
+    string getProp(bool classification = false);
 
 
     int id;
@@ -31,14 +32,15 @@ struct Record : public __wrap_iter<::Record *> {
     Status status;
     double income;
     bool borrower;
-    double classProb;
+    double probYes;
+    double probNo;
     bool testCase;
 
     // whether a field is missing or not, not taking into consideration id dimension, it must exist
     bool missing[d];
 };
 
-
+// Bayesian model class
 class Bayesian {
 private:
     int idGenerator;
@@ -55,15 +57,19 @@ public:
     void addRecord( bool owner, Status status, double income, bool borrower);
     void removeRecord();
     void setMissing(int index, bool owner, bool status, bool income, bool borrower);
-    void train(bool classValue = false);
+    void train(bool classValue = false, bool smooth = false);
+    double smooth(double value, double total, double multiplier);
     void setContinuous(bool classValue = false);
     void classifyRecord(Record& test, bool someMissing = false);
-    void test();
+    void test(bool classification = false);
     void print();
 
 };
 
 static void error(string s);
+static void process(Bayesian &model);
+static void print(string str);
+
 
 int main() {
     try{
@@ -80,21 +86,26 @@ int main() {
         model.addRecord(false,Married,75,false);
         model.addRecord(false,Single,90,true);
 
+
         // check for zero-frequency problem
         model.train();
         model.addRecord(false,Married,120,false);
-
+        print("Model before:");
         model.print();
+        print("Model with testing borrower = No");
         model.test();
         model.print();
+
         model.removeRecord();
 
 
-        model.train(true);
+        model.train(true, true);
         model.addRecord(false,Married,120,false);
 
+        model.test(true);
+        print("Model with testing borrower = Yes");
         model.print();
-        model.test();
+
 
         return 0;
     } catch(string error){
@@ -102,6 +113,18 @@ int main() {
         return 1;
     }
 
+}
+
+static void process(Bayesian &model, bool classification){
+    classification? model.train(classification, classification) : model.train(classification);
+    model.addRecord(false,Married,120,false);
+    if (!classification)model.print();
+    model.test();
+    model.print();
+}
+
+static void print(string str){
+    cout << endl << str << endl;
 }
 
 
@@ -120,7 +143,8 @@ Record::Record(int id, bool owner, Status status, double income, bool borrower) 
     this->income = income;
     this->borrower = borrower;
     this->testCase = false;
-    this->classProb = -1;
+    this->probYes = -1;
+    this->probNo = -1;
 
     for (int i = 0; i < d; i++){
         this->missing[i] = false;
@@ -177,9 +201,20 @@ string Record::getOwner() {
     return owner? "Yes  " : "No   ";
 }
 
-string Record::getProp() {
+string Record::getProp(bool classification) {
 
-    return (this->classProb == -1)? "?": to_string(this->classProb);
+    auto format = [](double predicted){
+        if (predicted == -1 )
+            return string("?        ");
+
+        stringstream stream;
+        stream << fixed << setprecision(15) << predicted;
+        string s = stream.str();
+        return s;
+    };
+
+    return classification? format(this->probYes): format(this->probNo);
+
 }
 
 /*
@@ -207,7 +242,7 @@ Bayesian::setMissing(int index, bool owner, bool status, bool income, bool borro
 }
 
 void
-Bayesian::train(bool classValue){
+Bayesian::train(bool classValue, bool smooth){
     double borrower = 0, owner=0, single=0, married = 0, divorced = 0;
     for (Record r: records){
         if (r.borrower != classValue)
@@ -219,19 +254,34 @@ Bayesian::train(bool classValue){
         if (r.status == Married) married++;
         if (r.status == Divorced) divorced++;
     }
-    if (!borrower || borrower == 1)// later in the deviation
+    if (!borrower || borrower == 1)
         error("division by zero.");
 
-    cout << double(owner/borrower)<<"-------\n";
+    //smooth if necessary
+    if ( !owner && smooth )
+        this->ownerProb = this->smooth(0, borrower, 2);
+    else
+        this->ownerProb = owner/borrower;
 
-    this->ownerProb = (double )owner/borrower;
+    if ( (!single || !married || !divorced) && smooth){
+        this->statusProb[Single] = this->smooth(single, borrower, 3);
+        this->statusProb[Married] = this->smooth(married, borrower, 3);
+        this->statusProb[Divorced] = this->smooth(divorced, borrower, 3);
+    } else {
+        this->statusProb[Single] = single/borrower; // If the first enumerator has no initializer, the value of the corresponding constant is zero
+        this->statusProb[Married] = married/borrower;
+        this->statusProb[Divorced] = divorced/borrower;
+    }
 
-    this->statusProb[Single] = single/borrower; // If the first enumerator has no initializer, the value of the corresponding constant is zero
-    this->statusProb[Married] = married/borrower;
-    this->statusProb[Divorced] = divorced/borrower;
+    cout << this->ownerProb <<"\ts: "<< this->statusProb[Single]<< "\tm: "<<this->statusProb[Married]<<"\td:"<<this->statusProb[Divorced]<<" ";
 
-    setContinuous();
+    setContinuous(classValue);
 
+}
+
+double
+Bayesian::smooth(double value, double n, double multiplier) {
+    return (value+1)/(n+multiplier);
 }
 
 void
@@ -258,6 +308,8 @@ Bayesian::setContinuous(bool classValue) {
     double result = exp(-1 * pow((income-mean),2) / (2 * variance))
                     /  sqrt(2 * M_PI * variance);
 
+    cout << result <<endl;
+
 
 }
 
@@ -268,25 +320,29 @@ static void error(string s){
 }
 
 void
-Bayesian::test() {
-    for (auto &r: records) 
-        classifyRecord(r);
+Bayesian::test(bool classification) {
+    for (auto &r: records)
+        classifyRecord(r, classification);
 }
 
 
 void
-Bayesian::classifyRecord(Record& test, bool someMissing){
+Bayesian::classifyRecord(Record& test, bool classification){
 
     double income = exp(-1 * pow((test.income-mean),2) / (2 * variance))
                     /  sqrt(2 * M_PI * variance);
+    if (test.id == 11){
+        cout << income<<endl;
+
+    }
 
     double owner = test.owner? this->ownerProb:(1-this->ownerProb);
     double result = this->statusProb[test.status] * owner * income;
-    test.classProb = result;
-
+    classification? test.probYes = result: test.probNo = result;
 
 }
 
+static double save;
 void
 Bayesian::removeRecord() {
     idGenerator--;
@@ -295,14 +351,17 @@ Bayesian::removeRecord() {
 
 inline void
 Bayesian::print(){
-    cout <<BCYAN<< "id\t| owner\t| status   \t| income\t| class\t| predicted class\n"<<RESET;
+    cout <<BCYAN<< "id\t| owner\t| status   \t| income\t| class\t| Yes Prob\t|  No Prob \n"<<RESET;
 
     for(Record r : records) {
         cout << r.num(r.id,2) << "\t| " << r.getOwner()
              << "\t| " << r.getStatus() << "\t| "
              << r.num(r.income,5) << "K\t| " <<BGREEN
              << r.num(r.borrower,2) <<RESET<<"   \t| "
-             <<BRED<<r.getProp() <<RESET<< '\n';
+             <<BRED<<r.getProp(true) <<"\t| "
+             <<r.getProp() <<"\t| "<<RESET<< '\n';
     }
     cout << endl;
 }
+
+
